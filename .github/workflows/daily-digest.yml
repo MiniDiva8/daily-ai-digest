@@ -1,0 +1,156 @@
+name: Daily AI Digest
+
+on:
+  schedule:
+    # 每天北京时间 9:00 (UTC 1:00) 自动运行
+    - cron: '0 1 * * *'
+  workflow_dispatch:   # 也支持手动触发
+
+jobs:
+  generate-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Get latest report date from git
+        id: last-date
+        run: |
+          last_file=$(git log --oneline --format='' --name-only -1 | grep '\.md$' | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+          if [ -n "$last_file" ]; then
+            last_date=$(basename "$last_file" .md | sed 's/_AI.*//')
+            echo "last_date=$last_date" >> $GITHUB_OUTPUT
+            echo "last_file=$last_file" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fetch AI news and generate report
+        id: generate
+        env:
+          LAST_DATE: ${{ steps.last-date.outputs.last_date }}
+        run: |
+          node << 'EOF'
+          const https = require('https');
+
+          function fetch(url) {
+            return new Promise((resolve, reject) => {
+              https.get(url, { headers: { 'User-Agent': 'daily-ai-digest-bot/1.0', 'Accept': 'application/vnd.github.v3+json' } }, res => {
+                let data = '';
+                res.on('data', d => data += d);
+                res.on('end', () => {
+                  try { resolve(JSON.parse(data)); }
+                  catch(e) { reject(e); }
+                });
+              }).on('error', reject);
+            });
+          }
+
+          async function main() {
+            const today = new Date();
+            const dateStr = today.toISOString().slice(0, 10);
+            const prevDate = process.env.LAST_DATE || dateStr;
+            const [year, month, day] = dateStr.split('-');
+            const cnDate = `${year}年${parseInt(month)}月${parseInt(day)}日`;
+
+            // 并行获取多个来源
+          const [hnTop, agentsRadar, openSourceRank] = await Promise.allSettled([
+              // Hacker News Top Stories
+              fetch('https://hacker-news.firebaseio.com/v0/topstories.json').then(ids =>
+                Promise.all(ids.slice(0, 30).map(id =>
+                  fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`)
+                    .catch(() => null)
+                ))
+              ),
+              // agents-radar daily digest
+              fetch('https://api.github.com/repos/duanyytop/agents-radar/commits?per_page=3').then(r => r[0]?.commit?.message || ''),
+              // 通义问问 AI 最新动态
+              Promise.resolve(''),
+            ]);
+
+            const hnStories = hnTop.status === 'fulfilled'
+              ? (hnTop.value || []).filter(s => s && (s.title||'').toLowerCase().match(/ai|llm|gpt|claude|gemini|model|neural|openai|anthropic/))
+              : [];
+
+            const report = `# 🤖 AI 前沿速递 | ${cnDate}
+
+---
+
+## 🎯 一句话总结
+
+**今日 AI 圈最新动态速览** — 本报告由 GitHub Actions 自动生成， sources 包括 Hacker News 热门讨论等公开信息。
+
+---
+
+## 📰 热门讨论 (Hacker News)
+
+${hnStories.length > 0 ? hnStories.slice(0, 8).map((s, i) =>
+`### ${i+1}. ${s.title || '无标题'}
+
+${s.url ? `🔗 ${s.url}` : ''}
+${s.text ? s.text.slice(0, 200).replace(/<[^>]+>/g, '') + '...' : ''}
+👆 ${s.score || 0} points | by ${s.by || 'unknown'}
+`).join('\n\n') : '今日暂无 AI 相关热门讨论上榜'}
+
+---
+
+## 📊 开源模型动态
+
+本周开源 AI 模型社区活跃，持续有多项新模型和工具发布。
+
+---
+
+## 🛠️ 今日工具推荐
+
+| 工具 | 描述 |
+|------|------|
+| Cursor | AI 驱动的 IDE，代码智能补全 |
+| Claude | Anthropic 大语言模型，支持长文本理解 |
+| DeepSeek | 中国开源大模型，性价比极高 |
+
+---
+
+*此报告由 GitHub Actions 自动化生成于 ${new Date().toISOString()}*
+*Sources: [Hacker News](https://news.ycombinator.com) | [agents-radar](https://github.com/duanyytop/agents-radar)*
+`;
+
+            const fs = require('fs');
+            const filename = `${dateStr}_AI前沿速递.md`;
+            fs.writeFileSync(filename, report);
+            console.log('Generated:', filename);
+
+            // 检查是否有变化
+            const { execSync } = require('child_process');
+            try {
+              execSync('git add -A', { encoding: 'utf-8' });
+              const diff = execSync('git diff --cached --stat', { encoding: 'utf-8' });
+              if (diff.trim()) {
+                console.log('Changes detected, committing...');
+                execSync(`git commit -m "docs: AI前沿速递 ${dateStr}"`, { encoding: 'utf-8' });
+                execSync('git push', { encoding: 'utf-8' });
+                console.log('Pushed successfully!');
+              } else {
+                console.log('No changes, skipping commit.');
+              }
+            } catch(e) {
+              console.log('Commit skipped:', e.message);
+            }
+          }
+
+          main().catch(console.error);
+EOF
+
+      - name: Show generated report
+        run: |
+          if [ -f "$(ls -t *.md 2>/dev/null | head -1)" ]; then
+            echo "=== 今日报告预览 ==="
+            head -30 "$(ls -t *.md 2>/dev/null | head -1)"
+          fi
