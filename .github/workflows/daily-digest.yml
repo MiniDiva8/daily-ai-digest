@@ -30,6 +30,11 @@ jobs:
           LAST_DATE: ${{ steps.last-date.outputs.last_date }}
         run: node .github/workflows/generate.mjs
 
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Commit and push
         run: |
           git add -A
